@@ -18,11 +18,14 @@ def get_db_connection():
     return conn
 
 @registration_bp.route("/", methods=["POST"])
+@registration_bp.route("", methods=["POST"])
 def register():
     try:
         data = request.get_json()
         if data is None:
-            return jsonify({"error": "Request body must be JSON"}), 400
+            data = request.form.to_dict()
+            if not data:
+                return jsonify({"error": "Request body must be JSON or form data"}), 400
 
         session_id = data.get("session_id")
         username = data.get("username")

@@ -34,11 +34,14 @@ def init_db():
 init_db()
 
 @login_bp.route("/", methods=["POST"])
+@login_bp.route("", methods=["POST"])
 def login_function():
     try:
         data = request.get_json()
         if data is None:
-            return jsonify({"error": "Request body must be JSON"}), 400
+            data = request.form.to_dict()
+            if not data:
+                return jsonify({"error": "Request body must be JSON or form data"}), 400
 
         username = data.get("username")
         password = data.get("password")

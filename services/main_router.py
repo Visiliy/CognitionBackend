@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import tempfile
 from flask import *
 from werkzeug.utils import secure_filename
 import yadisk
@@ -97,23 +98,29 @@ def main_router_functions():
             except yadisk.exceptions.PathNotFoundError:
                 pass
 
+        uploaded_files = []
         for file in files_list:
             filename = secure_filename(file.filename)
             if not filename:
                 continue
 
-            temp_path = f"/tmp/{filename}"
+            temp_dir = tempfile.gettempdir()
+            temp_path = os.path.join(temp_dir, filename)
             try:
                 file.save(temp_path)
                 remote_path = f"{storage_path}/{filename}" if add_files_to_storage == "true" else f"{private_storage_path}/{filename}"
                 client.upload(temp_path, remote_path, overwrite=True)
+                uploaded_files.append(filename)
             finally:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
 
         upsert_session(db_path, session_id, 1 if is_registered else 0)
 
-        return jsonify([{"SearchAnswer": "Ответ успешно завершён"}]), 200
+        response_data = {"SearchAnswer": "Ответ успешно завершён"}
+        if uploaded_files:
+            response_data["UploadedFiles"] = uploaded_files
+        return jsonify([response_data]), 200
 
     except Exception as e:
         import traceback
@@ -131,6 +138,20 @@ def delete_session():
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM SessionsID WHERE session_id = ?", (session_id,))
+
+        user_enter_db_path = "db/users_enter.db"
+        if os.path.isfile(user_enter_db_path):
+            with sqlite3.connect(user_enter_db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM users WHERE session_id = ?", (session_id,))
+
+        client = get_yadisk_client()
+        session_dir = f"{main_path}/{session_id}"
+        if client.exists(session_dir):
+            try:
+                client.remove(session_dir, permanently=True)
+            except Exception as e:
+                print(f"Warn: failed to remove {session_dir}: {e}")
 
         return jsonify([{"Message": "Сессия успешно удалена"}]), 200
 
@@ -169,3 +190,38 @@ def upload_storage_files():
         return jsonify([{"Message": "session_id required"}]), 400
     files = _list_files(session_id, "storage")
     return jsonify([{"FilesNames": files}]), 200
+
+
+@main_router.route("/download_file", methods=["GET"])
+def download_file():
+    try:
+        session_id = request.args.get("session_id")
+        filename = request.args.get("filename")
+        storage_type = request.args.get("storage_type", "storage")
+        
+        if not session_id or not filename:
+            return jsonify([{"Message": "session_id and filename required"}]), 400
+        
+        if storage_type not in ["storage", "private_storage"]:
+            return jsonify([{"Message": "storage_type must be 'storage' or 'private_storage'"}]), 400
+        
+        client = get_yadisk_client()
+        remote_path = f"{main_path}/{session_id}/{storage_type}/{filename}"
+        
+        if not client.exists(remote_path):
+            return jsonify([{"Message": "File not found"}]), 404
+        
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, filename)
+        
+        try:
+            client.download(remote_path, temp_path)
+            return send_file(temp_path, as_attachment=True, download_name=filename)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify([{"Message": "Global server error", "error": str(e)}]), 500
