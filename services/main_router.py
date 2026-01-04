@@ -29,6 +29,13 @@ def init_db(path):
         """)
 
 
+def get_session_info(path, session_id):
+    with sqlite3.connect(path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id, is_register FROM SessionsID WHERE session_id = ?", (session_id,))
+        return cursor.fetchone()
+
+
 def upsert_session(path, session_id, is_register=0):
     with sqlite3.connect(path) as conn:
         cursor = conn.cursor()
@@ -51,7 +58,7 @@ def main_router_functions():
         files = request.files
 
         text = content.get("text", "")
-        add_files_to_storage = content.get("add_files_to_storage", "false")
+        add_files_to_storage = content.get("add_files_to_storage")
         is_registered = content.get("is_registered", "false") == "true"
         session_id = content.get("session_id")
 
@@ -66,9 +73,15 @@ def main_router_functions():
         storage_path = f"{session_dir}/storage"
         private_storage_path = f"{session_dir}/private_storage"
 
-        client.makedirs(session_dir, exist_ok=True)
-        client.makedirs(storage_path, exist_ok=True)
-        client.makedirs(private_storage_path, exist_ok=True)
+        if not client.exists(session_dir):
+            client.mkdir(session_dir)
+            client.mkdir(storage_path)
+            client.mkdir(private_storage_path)
+        else:
+            if not client.exists(storage_path):
+                client.mkdir(storage_path)
+            if not client.exists(private_storage_path):
+                client.mkdir(private_storage_path)
 
         files_list = files.getlist("files")
 
@@ -76,11 +89,11 @@ def main_router_functions():
             try:
                 items = client.listdir(private_storage_path)
                 for item in items:
-                    if item.get("type") == "file":
+                    if hasattr(item, 'type') and item.type == 'file':
                         try:
-                            client.remove(item["path"])
+                            client.remove(f"{private_storage_path}/{item.name}")
                         except Exception as e:
-                            print(f"Warn: failed to remove {item.get('path')}: {e}")
+                            print(f"Warn: failed to remove {item.name}: {e}")
             except yadisk.exceptions.PathNotFoundError:
                 pass
 
@@ -132,7 +145,7 @@ def _list_files(session_id, subdir):
         client = get_yadisk_client()
         path = f"{main_path}/{session_id}/{subdir}"
         items = client.listdir(path)
-        return [item["name"] for item in items if item.get("type") == "file"]
+        return [item.name for item in items if hasattr(item, 'type') and item.type == 'file']
     except yadisk.exceptions.PathNotFoundError:
         return []
     except Exception as e:
