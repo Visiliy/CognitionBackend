@@ -4,6 +4,9 @@ import tempfile
 from flask import *
 from werkzeug.utils import secure_filename
 import yadisk
+import PyPDF2
+from docx import Document
+import mammoth
 
 main_router = Blueprint("api", __name__, url_prefix="/main_router")
 
@@ -28,6 +31,15 @@ def init_db(path):
                 expires_at TEXT NOT NULL DEFAULT (datetime('now', '+1 day'))
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
 
 
 def get_session_info(path, session_id):
@@ -47,6 +59,50 @@ def upsert_session(path, session_id, is_register=0):
                 is_register = CASE WHEN is_register = 0 THEN excluded.is_register ELSE is_register END,
                 expires_at = CASE WHEN is_register = 0 THEN datetime('now', '+30 days') ELSE expires_at END
         """, (session_id, is_register))
+
+
+def _list_files_with_paths(session_id, subdir):
+    client = get_yadisk_client()
+    remote_dir = f"{main_path}/{session_id}/{subdir}"
+    try:
+        items = client.listdir(remote_dir)
+    except yadisk.exceptions.PathNotFoundError:
+        return []
+    result = []
+    for item in items:
+        if not hasattr(item, 'type') or item.type != 'file':
+            continue
+        filename = item.name
+        temp_path = os.path.join(tempfile.gettempdir(), secure_filename(filename))
+        try:
+            client.download(f"{remote_dir}/{filename}", temp_path)
+            result.append((filename, temp_path))
+        except Exception:
+            pass
+    return result
+
+
+def _read_file_content(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == ".txt":
+            with open(filepath, "r", encoding="utf-8") as f:
+                return f.read()
+        elif ext == ".pdf":
+            with open(filepath, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                return "\n".join(page.extract_text() or "" for page in reader.pages)
+        elif ext == ".docx":
+            doc = Document(filepath)
+            return "\n".join(paragraph.text for paragraph in doc.paragraphs)
+        elif ext == ".doc":
+            with open(filepath, "rb") as f:
+                result = mammoth.extract_raw_text(f)
+                return result.value
+        else:
+            return "[UNSUPPORTED FILE TYPE]"
+    except Exception:
+        return "[ERROR: Unable to read file content]"
 
 
 @main_router.route("/", methods=["POST"])
@@ -161,26 +217,21 @@ def delete_session():
         return jsonify([{"Message": "Global server error"}]), 500
 
 
-def _list_files(session_id, subdir):
-    try:
-        client = get_yadisk_client()
-        path = f"{main_path}/{session_id}/{subdir}"
-        items = client.listdir(path)
-        return [item.name for item in items if hasattr(item, 'type') and item.type == 'file']
-    except yadisk.exceptions.PathNotFoundError:
-        return []
-    except Exception as e:
-        print(f"Error listing {path}:", e)
-        return []
-
-
 @main_router.route("/upload_private_files", methods=["GET"])
 def upload_private_files():
     session_id = request.args.get("session_id")
     if not session_id:
         return jsonify([{"Message": "session_id required"}]), 400
-    files = _list_files(session_id, "private_storage")
-    return jsonify([{"FilesNames": files}]), 200
+    file_paths = _list_files_with_paths(session_id, "private_storage")
+    result = []
+    for name, path in file_paths:
+        content = _read_file_content(path)
+        result.append({"FileName": name, "Content": content})
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+    return jsonify(result), 200
 
 
 @main_router.route("/upload_storage_files", methods=["GET"])
@@ -188,8 +239,16 @@ def upload_storage_files():
     session_id = request.args.get("session_id")
     if not session_id:
         return jsonify([{"Message": "session_id required"}]), 400
-    files = _list_files(session_id, "storage")
-    return jsonify([{"FilesNames": files}]), 200
+    file_paths = _list_files_with_paths(session_id, "storage")
+    result = []
+    for name, path in file_paths:
+        content = _read_file_content(path)
+        result.append({"FileName": name, "Content": content})
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+    return jsonify(result), 200
 
 
 @main_router.route("/download_file", methods=["GET"])
@@ -212,7 +271,7 @@ def download_file():
             return jsonify([{"Message": "File not found"}]), 404
         
         temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, filename)
+        temp_path = os.path.join(temp_dir, secure_filename(filename))
         
         try:
             client.download(remote_path, temp_path)
